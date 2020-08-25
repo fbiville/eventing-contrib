@@ -18,19 +18,22 @@ package adapter
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"k8s.io/apimachinery/pkg/util/sets"
+	"io/ioutil"
 	"strconv"
 	"strings"
 	"time"
 
 	sourcesv1alpha1 "knative.dev/eventing-contrib/registry/pkg/apis/sources/v1alpha1"
+	"knative.dev/eventing-contrib/registry/pkg/reconciler/source/resources"
 	"knative.dev/eventing/pkg/adapter/v2"
 	"knative.dev/pkg/logging"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"go.uber.org/zap"
 
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"k8s.io/client-go/rest"
@@ -74,10 +77,11 @@ type registryAdapter struct {
 	ceClient    cloudevents.Client
 	k8sClient   *kubernetes.Clientset
 	env         *envConfig
-	digestCache map[string]string
+	cacheFile   string
+	digestCache map[string]string // Map of tag to digest
 }
 
-// NewAdapter returns the instance of gitHubReceiveAdapter that implements adapter.Adapter interface
+// NewAdapter returns the instance of registryAdapter that implements adapter.Adapter interface
 func NewAdapter(ctx context.Context, processed adapter.EnvConfigAccessor, ceClient cloudevents.Client) adapter.Adapter {
 	logger := logging.FromContext(ctx)
 	env := processed.(*envConfig)
@@ -91,6 +95,7 @@ func NewAdapter(ctx context.Context, processed adapter.EnvConfigAccessor, ceClie
 		ceClient:    ceClient,
 		k8sClient:   k8sClient,
 		env:         env,
+		cacheFile:   fmt.Sprintf("%s/%s", resources.StateMountPath, "cache"),
 		digestCache: map[string]string{},
 	}
 }
@@ -113,7 +118,31 @@ func (a *registryAdapter) Start(ctx context.Context) error {
 	return a.start(ctx.Done())
 }
 
+func (a *registryAdapter) loadCachedTagDigests() {
+	content, err := ioutil.ReadFile(a.cacheFile)
+	if err != nil {
+		// Couldn't read the cache. We'll just continue without cached data.
+		return
+	}
+	json.Unmarshal(content, &a.digestCache)
+}
+
+func (a *registryAdapter) saveCachedTagDigests() {
+	bytes, err := json.Marshal(a.digestCache)
+	if err != nil { // Why is the map bad?
+		a.logger.Warnf("Failed to marshal digest cache: %s", err.Error())
+		return
+	}
+	err = ioutil.WriteFile(a.cacheFile, bytes, 0644)
+	if err != nil {
+		a.logger.Warnf("Unable to write to cache file: %s", err.Error())
+		return
+	}
+}
+
 func (a *registryAdapter) start(stopCh <-chan struct{}) error {
+	a.loadCachedTagDigests()
+
 	repositoryPath, err := a.getFullRepositoryPath()
 	if err != nil {
 		return err
@@ -124,7 +153,7 @@ func (a *registryAdapter) start(stopCh <-chan struct{}) error {
 	}
 	pollInterval, err := strconv.Atoi(a.env.EnvPollInterval)
 	if err != nil {
-		a.logger.Warn(fmt.Sprintf("cannot parse polling interval :%s, defaulting to 10 seconds", a.env.EnvPollInterval))
+		a.logger.Warnf("cannot parse polling interval :%s, defaulting to 10 seconds", a.env.EnvPollInterval)
 		pollInterval = 10
 	}
 	ticker := time.NewTicker(time.Duration(pollInterval) * time.Second)
@@ -171,7 +200,10 @@ func (a *registryAdapter) pollRegistry() error {
 		watchedTags = sets.NewString(strings.Split(*rawTags, ",")...)
 	}
 
+	defer a.saveCachedTagDigests()
+
 outer:
+	// Remove tags that don't exist anymore.
 	for cachedTag := range a.digestCache {
 		for _, tag := range fetchedTags {
 			if tag == cachedTag {
@@ -203,6 +235,7 @@ outer:
 			return err
 		}
 	}
+
 	return err
 }
 
@@ -227,11 +260,11 @@ func (a *registryAdapter) sendEvent(eventType string, desc *remote.Descriptor) e
 	}
 	event.SetExtension("action", eventType)
 
-	payload := map[string]string {
-		"Action": eventType,
+	payload := map[string]string{
+		"Action":      eventType,
 		"ResourceURI": buildImageStrWithDigest(desc),
-		"Digest": desc.Digest.String(),
-		"Tag": desc.Ref.Identifier(),
+		"Digest":      desc.Digest.String(),
+		"Tag":         desc.Ref.Identifier(),
 	}
 
 	a.logger.Info(fmt.Sprintf("sending cloudevent %+v: with payload:%+v", event, payload))

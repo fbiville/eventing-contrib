@@ -34,6 +34,8 @@ type ServiceArgs struct {
 	Source              *sourcesv1alpha1.RegistrySource
 }
 
+const StateMountPath string = "/state"
+
 // MakeDeployment generates, but does not create, a Deployment for the given
 // RegistrySource.
 func MakeDeployment(args *ServiceArgs) (*appsv1.Deployment, error) {
@@ -104,10 +106,24 @@ func MakeDeployment(args *ServiceArgs) (*appsv1.Deployment, error) {
 				Spec: corev1.PodSpec{
 					ServiceAccountName: args.Source.Spec.ServiceAccountName,
 					Containers: []corev1.Container{{
-						Name: "registry-poller",
+						Name:  "registry-poller",
 						Image: args.ReceiveAdapterImage,
 						Env:   env,
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								MountPath: StateMountPath,
+								Name:      "state-volume",
+							},
+						},
 					}},
+					Volumes: []corev1.Volume{
+						{
+							Name: "state-volume",
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
+						},
+					},
 				},
 			},
 		},
