@@ -122,9 +122,13 @@ func (a *registryAdapter) loadCachedTagDigests() {
 	content, err := ioutil.ReadFile(a.cacheFile)
 	if err != nil {
 		// Couldn't read the cache. We'll just continue without cached data.
+		a.logger.Warnf("Failed to read cache file: %s", err.Error())
 		return
 	}
-	json.Unmarshal(content, &a.digestCache)
+	err = json.Unmarshal(content, &a.digestCache)
+	if err != nil {
+		a.logger.Warnf("Failed to unmarshal cached digests: %s", err.Error())
+	}
 }
 
 func (a *registryAdapter) saveCachedTagDigests() {
